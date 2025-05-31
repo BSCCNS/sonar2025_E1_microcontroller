@@ -8,14 +8,14 @@ import time
 import os
 import subprocess
 
-from socketudp import SocketUDP, format_wf_point
+from socketudp import send_wf_point
 
 # Configuration
-RECORD_SECONDS = 10
-SAMPLE_RATE = 44100
-CHANNELS = 1
-
-SAMPLEWIDTH = 3 # 24 bits per sample
+RECORD_SECONDS = 10 # Duration of recording in seconds
+SAMPLE_RATE = 44100 # Sample rate in Hz check with microphone
+CHANNELS = 1 # Number of audio channels (1 for mono, 2 for stereo)
+BLOCKSIZE = 1024 # Block size for audio processing, smaller uses more cpu but gives faster response
+SAMPLEWIDTH = 3 # 24 bits per sample, better wavs
 
 # Global control flags
 recording = False
@@ -25,8 +25,7 @@ wait_cancel_event = threading.Event()
 
 last_file_created = None
 
-def send_volume_levels(audio_queue, stop_event):
-    socket = SocketUDP("localhost", debug= None)
+def send_volume_levels(audio_queue, stop_event):    
     while not stop_event.is_set():
         if not audio_queue:
             time.sleep(0.05)
@@ -35,7 +34,7 @@ def send_volume_levels(audio_queue, stop_event):
         # rms = librosa.feature.rms(y=indata)
         # vol = np.mean(rms)
         volume = float(np.linalg.norm(chunk) / len(chunk))
-        socket.send(format_wf_point(volume))
+        send_wf_point(volume)
         # message = str(volume).encode()
         # sock.sendto(message, (UDP_IP, UDP_PORT))
 
@@ -48,7 +47,7 @@ def wait_for_converted_file(converted_filename, wait_cancel_event):
             print("[x] Waiting for converted file canceled by user.")
             waiting_for_file = False
             return
-        time.sleep(0.1)
+        time.sleep(0.05)
     print(f"[✓] Converted file detected: {converted_filename}")
     last_file_created = converted_filename
     waiting_for_file = False
@@ -83,7 +82,6 @@ def save_to_wav(filename, audio_np):
             wf.writeframes(audio_int32.tobytes())            
 
 
-
 def record_audio():
     global recording, cancel_requested, wait_cancel_event, waiting_for_file
 
@@ -109,8 +107,16 @@ def record_audio():
         audio_queue.append(indata.copy())
 
     try:
-        with sd.InputStream(callback=callback, channels=CHANNELS, samplerate=SAMPLE_RATE):
-            sd.sleep(RECORD_SECONDS * 1000)
+        with sd.InputStream(callback=callback, 
+                            channels=CHANNELS, 
+                            samplerate=SAMPLE_RATE,
+                            blocksize=BLOCKSIZE):
+            start_time = time.time()
+            while (time.time() - start_time) < RECORD_SECONDS:
+                if cancel_requested:
+                    break
+                time.sleep(0.1)  # Check every 50ms for cancellation
+
     except sd.CallbackStop:
         print("[!] Recording canceled.")
     finally:
@@ -124,7 +130,7 @@ def record_audio():
         save_to_wav(filename, audio_np)
         print(f"[✓] Saved to {filename}")
         ### SEND TO CONVERSION
-        time.sleep(3) # TODO delete in production
+        time.sleep(3) # TODO delete in production and chango to Applio call
         cmd = ["cp", filename, converted_filename]  # Replace with your actual command
         print(f"[*] Running conversion asynchronously: {' '.join(cmd)}")
         try:

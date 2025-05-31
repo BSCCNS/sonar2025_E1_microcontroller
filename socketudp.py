@@ -47,36 +47,40 @@ class SocketUDP():
     def send(self, message_dict):
         """
         """
+
         current = time.time_ns()
 
         logging.debug(f"Current: {current}")
         logging.debug(f"Last   : {self.last_call}")
 
         if current - self.last_call < self.min_time:
-            #logging.warning(f"Llamadas muy próximas. Ignorando frame")
-            return False
+            logging.warning(f"Llamadas muy próximas. Ignorando frame")
+            return 
             
         self.socket.sendto((json.dumps(message_dict)).encode(), self.address)
         self.last_call = current
 
         logging.debug(f"Message sent")
 
-        return True
-
-
-def format_wf_point(y):
-    return {'type': 'waveform',
+def send_wf_point(y):
+    d = {'type': 'waveform',
         'message': {'data': y}}
-
+    
+    with SocketUDP("localhost", debug= None) as socket:
+        socket.send(d)
 
 def send_ls_array(array):
-    with SocketUDP("localhost", debug= None) as socket:
-        for i, row in enumerate(array):
-            d = {'type': 'latent',
-                'message': {'frame': i, 'data': d}}
-            socket.send(d)            
-    send_ls_finish()       
-    
+    for i, row in enumerate(array):
+        send_ls_slice(row, frame = i)
+    send_ls_finish()
+
+def send_ls_slice(array_xyz, frame = 0):
+    d = {'type': 'latent',
+        'message': {'frame': frame, 'data': array_xyz}}
+
+    with SocketUDP("localhost", debug= None) as socket:    
+        socket.send(d)
+
 def send_ls_finish():
     d = {'type': 'end_latent',
         'message': {'frame': -1}}
