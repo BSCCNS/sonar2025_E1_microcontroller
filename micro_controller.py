@@ -104,7 +104,9 @@ def record_audio(stdscr):
     wait_cancel_event.clear()
     waiting_for_file = False
 
-    screen_clear(stdscr)    
+    screen_clear(stdscr)   
+    stdscr.move(1, 0)
+    stdscr.clrtoeol() 
     stdscr.addstr(1, 0, f"[*] Recording started. Press ctrl-X to cancel.")  
     stdscr.refresh() 
 
@@ -129,6 +131,8 @@ def record_audio(stdscr):
                 time.sleep(0.1)  # Check every 50ms for cancellation
 
     except sd.CallbackStop:
+        stdscr.move(1, 0)
+        stdscr.clrtoeol()         
         stdscr.addstr(1, 0, f"[!] Recording canceled.")  
         stdscr.refresh()         
     finally:
@@ -137,10 +141,14 @@ def record_audio(stdscr):
         recording = False
 
     if not cancel_requested:
+        stdscr.move(2, 0)
+        stdscr.clrtoeol()         
         stdscr.addstr(2, 0, f"[*] Saving to {filename}...")  
         stdscr.refresh()           
         audio_np = np.concatenate(audio_data, axis=0)
         save_to_wav(filename, audio_np)
+        stdscr.move(3, 0)
+        stdscr.clrtoeol()         
         stdscr.addstr(3, 0, f"[✓] Saved to {filename}")  
         stdscr.refresh()         
         ### SEND TO CONVERSION
@@ -152,6 +160,7 @@ def record_audio(stdscr):
             proc = subprocess.Popen(cmd)
             # Do NOT wait for proc to finish here!
         except Exception as e:
+            screen_clear(stdscr)         
             stdscr.addstr(1, 0, f"[x] Conversion failed to start: {e}")  
             stdscr.refresh()           
 
@@ -163,6 +172,7 @@ def record_audio(stdscr):
         #     time.sleep(1)
         # print(f"[✓] Converted file detected: {converted_filename}")
     else:
+        screen_clear(stdscr)         
         stdscr.addstr(1, 0, f"[x] Recording not saved.")  
         stdscr.refresh()  
 
