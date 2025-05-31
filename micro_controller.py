@@ -2,19 +2,26 @@ import sounddevice as sd
 import numpy as np
 # parece que wave es el emas rapido https://github.com/bastibe/python-soundfile/issues/376
 import wave
-from pynput import keyboard
+import soundfile as sf
 import threading
 import time
 import os
 import subprocess
+import curses
+import shutil
 
 from socketudp import send_wf_point
+# TODO FINISH THE REST OF COMMS
+try:
+    COLUMNS, _ = shutil.get_terminal_size()
+except AttributeError:
+    COLUMNS = 80
 
 # Configuration
 RECORD_SECONDS = 10 # Duration of recording in seconds
 SAMPLE_RATE = 44100 # Sample rate in Hz check with microphone
 CHANNELS = 1 # Number of audio channels (1 for mono, 2 for stereo)
-BLOCKSIZE = 1024 # Block size for audio processing, smaller uses more cpu but gives faster response
+BLOCKSIZE = 4096 # Block size for audio processing, smaller uses more cpu but gives faster response
 SAMPLEWIDTH = 3 # 24 bits per sample, better wavs
 
 # Global control flags
@@ -22,10 +29,11 @@ recording = False
 cancel_requested = False
 waiting_for_file = False
 wait_cancel_event = threading.Event()
-
 last_file_created = None
 
-def send_volume_levels(audio_queue, stop_event):    
+# Create a nice output gradient using ANSI escape sequences.
+# Stolen from https://gist.github.com/maurisvh/df919538bcef391bc89f
+def send_volume_levels(audio_queue, stop_event, stdscr):    
     while not stop_event.is_set():
         if not audio_queue:
             time.sleep(0.05)
@@ -37,34 +45,35 @@ def send_volume_levels(audio_queue, stop_event):
         send_wf_point(volume)
         # message = str(volume).encode()
         # sock.sendto(message, (UDP_IP, UDP_PORT))
+        col = int(100 * volume * (COLUMNS - 1))  # Scale volume to terminal width
+        col = min(max(col, 0), COLUMNS - 1)  # Ensure col is within bounds
+        line = '█' * col + ' ' * (COLUMNS - col)
+        stdscr.addstr(2, 0, line)  
 
-def wait_for_converted_file(converted_filename, wait_cancel_event):
+
+
+def wait_for_converted_file(converted_filename, wait_cancel_event, stdscr):
     global waiting_for_file, last_file_created
     waiting_for_file = True
-    print(f"[*] Waiting for {converted_filename} to appear... (press ctrl-q to cancel)")
+    screen_clear(stdscr)
+    stdscr.addstr(1, 0, f"[*] Waiting for {converted_filename} to appear... (press ctrl-X to cancel)")
+    stdscr.refresh()    
     while not os.path.exists(converted_filename):
         if wait_cancel_event.is_set():
-            print("[x] Waiting for converted file canceled by user.")
+            stdscr.addstr(2, 0, "[x] Waiting for converted file canceled by user.")
+            stdscr.refresh()    
             waiting_for_file = False
             return
         time.sleep(0.05)
-    print(f"[✓] Converted file detected: {converted_filename}")
+    stdscr.addstr(2, 0, f"[✓] Converted file detected: {converted_filename}")
+    stdscr.refresh()        
     last_file_created = converted_filename
     waiting_for_file = False
 
 def save_to_wav(filename, audio_np):
     if SAMPLEWIDTH == 3:
-        # Convert float32 [-1, 1] to int32, then to 24-bit PCM bytes
-        audio_int32 = np.clip(audio_np * 2147483647, -2147483648, 2147483647).astype(np.int32)
-        # Convert int32 to 24-bit PCM bytes (little endian)
-        audio_bytes = audio_int32.astype('<i4').tobytes()
-        # Remove the highest byte to get 3 bytes per sample
-        audio_bytes_24 = b''.join([audio_bytes[i:i+3] for i in range(0, len(audio_bytes), 4)])
-        with wave.open(filename, 'wb') as wf:
-            wf.setnchannels(CHANNELS)
-            wf.setsampwidth(3)  # 24 bits = 3 bytes
-            wf.setframerate(SAMPLE_RATE)
-            wf.writeframes(audio_bytes_24)
+        # difficult to save 24-bit directly, use a library
+        sf.write(filename, audio_np, SAMPLE_RATE, subtype='PCM_24')
     elif SAMPLEWIDTH == 2:
         audio_np = (audio_np * 32767).astype(np.int16)  # Convert to 16-bit
         with wave.open(filename, 'wb') as wf:
@@ -82,7 +91,7 @@ def save_to_wav(filename, audio_np):
             wf.writeframes(audio_int32.tobytes())            
 
 
-def record_audio():
+def record_audio(stdscr):
     global recording, cancel_requested, wait_cancel_event, waiting_for_file
 
     filename = f"recording_{int(time.time())}.wav"
@@ -95,9 +104,11 @@ def record_audio():
     wait_cancel_event.clear()
     waiting_for_file = False
 
-    print("[*] Recording started. Press ctrl-q to cancel.")
+    screen_clear(stdscr)    
+    stdscr.addstr(1, 0, f"[*] Recording started. Press ctrl-X to cancel.")  
+    stdscr.refresh() 
 
-    udp_thread = threading.Thread(target=send_volume_levels, args=(audio_queue, stop_event))
+    udp_thread = threading.Thread(target=send_volume_levels, args=(audio_queue, stop_event, stdscr))
     udp_thread.start()
 
     def callback(indata, frames, time_info, status):
@@ -118,82 +129,79 @@ def record_audio():
                 time.sleep(0.1)  # Check every 50ms for cancellation
 
     except sd.CallbackStop:
-        print("[!] Recording canceled.")
+        stdscr.addstr(1, 0, f"[!] Recording canceled.")  
+        stdscr.refresh()         
     finally:
         stop_event.set()
         udp_thread.join()
         recording = False
 
     if not cancel_requested:
-        print(f"[*] Saving to {filename}...")
+        stdscr.addstr(2, 0, f"[*] Saving to {filename}...")  
+        stdscr.refresh()           
         audio_np = np.concatenate(audio_data, axis=0)
         save_to_wav(filename, audio_np)
-        print(f"[✓] Saved to {filename}")
+        stdscr.addstr(3, 0, f"[✓] Saved to {filename}")  
+        stdscr.refresh()         
         ### SEND TO CONVERSION
         time.sleep(3) # TODO delete in production and chango to Applio call
         cmd = ["cp", filename, converted_filename]  # Replace with your actual command
-        print(f"[*] Running conversion asynchronously: {' '.join(cmd)}")
+        stdscr.addstr(4, 0, f"[*] Running conversion asynchronously: {' '.join(cmd)}") 
+        stdscr.refresh()
         try:
             proc = subprocess.Popen(cmd)
             # Do NOT wait for proc to finish here!
         except Exception as e:
-            print(f"[x] Conversion failed to start: {e}")
+            stdscr.addstr(1, 0, f"[x] Conversion failed to start: {e}")  
+            stdscr.refresh()           
 
         # Wait for conversion
-        wait_thread = threading.Thread(target=wait_for_converted_file, args=(converted_filename, wait_cancel_event))
+        wait_thread = threading.Thread(target=wait_for_converted_file, args=(converted_filename, wait_cancel_event, stdscr))
         wait_thread.start()
         wait_thread.join()
         # while not os.path.exists(converted_filename):
         #     time.sleep(1)
         # print(f"[✓] Converted file detected: {converted_filename}")
     else:
-        print("[x] Recording not saved.")
+        stdscr.addstr(1, 0, f"[x] Recording not saved.")  
+        stdscr.refresh()  
 
-# Track modifier state
-pressed_modifiers = set()
-def on_press(key):
-    global recording, cancel_requested, wait_cancel_event, waiting_for_file
+def screen_clear(stdscr):
+    stdscr.clear()
+    stdscr.addstr(0, 0, "Press Ctrl+R to record, Ctrl+X to cancel, Ctrl+P to play, Ctrl+C to exit.")
 
-    # Track Ctrl key state
-    if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-        pressed_modifiers.add('ctrl')
-        return
-    
-    # Print debug info
-    print(f"Pressed: {key}, char: {getattr(key, 'char', None)}, modifiers: {pressed_modifiers}")
 
-    # Check for Control+R, Control+C, Control+P
-    if 'ctrl' in pressed_modifiers and isinstance(key, keyboard.KeyCode):
-        char = key.char.lower() if key.char else ''
-        if char == 'r' and not recording:
-            threading.Thread(target=record_audio).start()
-        elif char == 'q':
+def main(stdscr):
+    global recording, cancel_requested, waiting_for_file, wait_cancel_event, last_file_created
+
+    curses.noecho()
+    curses.cbreak()
+    stdscr.nodelay(True)
+    screen_clear(stdscr)
+    stdscr.refresh()
+
+    while True:
+        key = stdscr.getch()
+        if key == 3:  # Ctrl+C
+            break
+        elif key == 18 and not recording and not waiting_for_file:  # Ctrl+R
+            threading.Thread(target=record_audio, args=(stdscr,)).start()
+        elif key == 24:  # Ctrl+X            
             if recording:
                 cancel_requested = True
             if waiting_for_file:
-                print("[x] Canceling waiting for converted file...")
+                stdscr.addstr(1, 0, "[x] Canceling waiting for converted file...")
+                stdscr.refresh()
                 wait_cancel_event.set()
-        elif char == 'p' and not recording and not waiting_for_file:
+        elif key == 16 and not recording and not waiting_for_file:  # Ctrl+P
             if last_file_created is not None:
-                print(f"[*] Started playing...{last_file_created}")
+                stdscr.addstr(1, 0, f"[*] Started playing...{last_file_created}")  
+                stdscr.refresh()              
             else:
-                print(f"[x] No file to play. {last_file_created}")
-
-def on_release(key):
-    # Remove Ctrl key state
-    if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-        pressed_modifiers.discard('ctrl')
-
-
-def main():
-    print("=== Audio Recorder ===")
-    print("Press Ctrl+R to record 10 seconds of audio.")
-    print("Press Ctrl+Q during recording to cancel.")
-    print("Press Ctrl+P to play last recorded file.")
-    print("Press Ctrl+C to exit.")
-    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-        listener.join()
-
+                stdscr.addstr(1, 0, "[x] No file to play.")
+                stdscr.refresh()
+        time.sleep(0.05)
 
 if __name__ == "__main__":
-    main()
+    curses.wrapper(main)
+
