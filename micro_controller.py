@@ -21,8 +21,9 @@ SAMPLEWIDTH = 3 # 24 bits per sample
 recording = False
 cancel_requested = False
 waiting_for_file = False
-
 wait_cancel_event = threading.Event()
+
+last_file_created = None
 
 def send_volume_levels(audio_queue, stop_event):
     socket = SocketUDP("localhost", debug= None)
@@ -39,9 +40,9 @@ def send_volume_levels(audio_queue, stop_event):
         # sock.sendto(message, (UDP_IP, UDP_PORT))
 
 def wait_for_converted_file(converted_filename, wait_cancel_event):
-    global waiting_for_file
+    global waiting_for_file, last_file_created
     waiting_for_file = True
-    print(f"[*] Waiting for {converted_filename} to appear... (press 'c' to cancel)")
+    print(f"[*] Waiting for {converted_filename} to appear... (press ctrl-q to cancel)")
     while not os.path.exists(converted_filename):
         if wait_cancel_event.is_set():
             print("[x] Waiting for converted file canceled by user.")
@@ -49,6 +50,7 @@ def wait_for_converted_file(converted_filename, wait_cancel_event):
             return
         time.sleep(0.1)
     print(f"[✓] Converted file detected: {converted_filename}")
+    last_file_created = converted_filename
     waiting_for_file = False
 
 def save_to_wav(filename, audio_np):
@@ -86,6 +88,7 @@ def record_audio():
     global recording, cancel_requested, wait_cancel_event, waiting_for_file
 
     filename = f"recording_{int(time.time())}.wav"
+    converted_filename = filename.replace('.wav', '_converted.wav')
     audio_data = []
     audio_queue = []
     stop_event = threading.Event()
@@ -94,7 +97,7 @@ def record_audio():
     wait_cancel_event.clear()
     waiting_for_file = False
 
-    print("[*] Recording started. Press 'c' to cancel.")
+    print("[*] Recording started. Press ctrl-q to cancel.")
 
     udp_thread = threading.Thread(target=send_volume_levels, args=(audio_queue, stop_event))
     udp_thread.start()
@@ -121,9 +124,8 @@ def record_audio():
         save_to_wav(filename, audio_np)
         print(f"[✓] Saved to {filename}")
         ### SEND TO CONVERSION
-        converted_filename = filename.replace('.wav', '_converted.wav')
-
-        cmd = ["sleep 5; cp", filename, converted_filename]  # Replace with your actual command
+        time.sleep(3) # TODO delete in production
+        cmd = ["cp", filename, converted_filename]  # Replace with your actual command
         print(f"[*] Running conversion asynchronously: {' '.join(cmd)}")
         try:
             proc = subprocess.Popen(cmd)
@@ -132,7 +134,6 @@ def record_audio():
             print(f"[x] Conversion failed to start: {e}")
 
         # Wait for conversion
-        print(f"[*] Waiting for {converted_filename} to appear...")
         wait_thread = threading.Thread(target=wait_for_converted_file, args=(converted_filename, wait_cancel_event))
         wait_thread.start()
         wait_thread.join()
@@ -142,28 +143,51 @@ def record_audio():
     else:
         print("[x] Recording not saved.")
 
+# Track modifier state
+pressed_modifiers = set()
 def on_press(key):
     global recording, cancel_requested, wait_cancel_event, waiting_for_file
 
-    try:
-        if key.char == 'r' and not recording:
+    # Track Ctrl key state
+    if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+        pressed_modifiers.add('ctrl')
+        return
+    
+    # Print debug info
+    print(f"Pressed: {key}, char: {getattr(key, 'char', None)}, modifiers: {pressed_modifiers}")
+
+    # Check for Control+R, Control+C, Control+P
+    if 'ctrl' in pressed_modifiers and isinstance(key, keyboard.KeyCode):
+        char = key.char.lower() if key.char else ''
+        if char == 'r' and not recording:
             threading.Thread(target=record_audio).start()
-        elif key.char == 'c':
-            if recording:               
+        elif char == 'q':
+            if recording:
                 cancel_requested = True
             if waiting_for_file:
                 print("[x] Canceling waiting for converted file...")
                 wait_cancel_event.set()
-    except AttributeError:
-        pass
+        elif char == 'p' and not recording and not waiting_for_file:
+            if last_file_created is not None:
+                print(f"[*] Started playing...{last_file_created}")
+            else:
+                print(f"[x] No file to play. {last_file_created}")
+
+def on_release(key):
+    # Remove Ctrl key state
+    if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+        pressed_modifiers.discard('ctrl')
+
 
 def main():
     print("=== Audio Recorder ===")
-    print("Press 'r' to record 10 seconds of audio.")
-    print("Press 'c' during recording to cancel.")
+    print("Press Ctrl+R to record 10 seconds of audio.")
+    print("Press Ctrl+Q during recording to cancel.")
+    print("Press Ctrl+P to play last recorded file.")
     print("Press Ctrl+C to exit.")
-    with keyboard.Listener(on_press=on_press) as listener:
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
         listener.join()
+
 
 if __name__ == "__main__":
     main()
