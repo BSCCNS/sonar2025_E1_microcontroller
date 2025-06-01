@@ -35,7 +35,8 @@ OUTPUTFOLDER = ROOTFOLDER / "output"
 # Ensure input and output directories exist
 INPUTFOLDER.mkdir(parents=True, exist_ok=True)
 OUTPUTFOLDER.mkdir(parents=True, exist_ok=True)
-
+MAXPITCH = 18
+MINPITCH = -18
 
 # Global control flags
 recording = False
@@ -44,6 +45,7 @@ waiting_for_file = False
 wait_cancel_event = threading.Event()
 last_file_created = None
 LS_last_file_created = None
+current_pitch = 0
 
 # Create a nice output gradient using ANSI escape sequences.
 # Stolen from https://gist.github.com/maurisvh/df919538bcef391bc89f
@@ -65,7 +67,7 @@ def send_volume_levels(audio_queue, stop_event, stdscr):
         stdscr.addstr(2, 0, line)  
 
 def wait_for_converted_file(converted_filename, wait_cancel_event, stdscr):
-    global waiting_for_file, last_file_created, LS_last_file_created
+    global waiting_for_file, last_file_created, LS_last_file_created, current_pitch
     send_converting_task() ## Tell Unreal Engine we are converting
     waiting_for_file = True
     screen_clear(stdscr)
@@ -83,7 +85,7 @@ def wait_for_converted_file(converted_filename, wait_cancel_event, stdscr):
     stdscr.addstr(2, 0, f"[✓] Converted file detected: {converted_filename}")
     stdscr.refresh()        
     last_file_created = converted_filename
-    LS_last_file_created = "LS_"+ converted_filename.with_suffix('.csv')  
+    LS_last_file_created = converted_filename.with_suffix('.csv')  
     waiting_for_file = False
 
 def save_to_wav(filename, audio_np):
@@ -199,7 +201,7 @@ def screen_clear(stdscr):
 
 
 def main(stdscr):
-    global recording, cancel_requested, waiting_for_file, wait_cancel_event, LS_last_file_created
+    global recording, cancel_requested, waiting_for_file, wait_cancel_event, LS_last_file_created, current_pitch
 
     curses.noecho()
     curses.cbreak()
@@ -209,6 +211,8 @@ def main(stdscr):
 
     while True:
         key = stdscr.getch()
+        if key!=-1:
+            stdscr.addstr(5, 0, f"{key} ")  # Debugging line to show key pressed
         if key == 3:  # Ctrl+C
             break
         elif key == 18 and not recording and not waiting_for_file:  # Ctrl+R
@@ -217,17 +221,34 @@ def main(stdscr):
             if recording:
                 cancel_requested = True
             if waiting_for_file:
+                stdscr.move(1, 0)
+                stdscr.clrtoeol() 
                 stdscr.addstr(1, 0, "[x] Canceling waiting for converted file...")
                 stdscr.refresh()
                 wait_cancel_event.set()
         elif key == 16 and not recording and not waiting_for_file:  # Ctrl+P
             if last_file_created is not None:
                 send_play_task(str(last_file_created), str(LS_last_file_created))
+                screen_clear(stdscr)
                 stdscr.addstr(1, 0, f"[*] Started playing...{last_file_created}")  
                 stdscr.refresh()              
             else:
+                stdscr.move(1, 0)
+                stdscr.clrtoeol() 
                 stdscr.addstr(1, 0, "[x] No file to play.")
                 stdscr.refresh()
+        elif key == 7:
+            current_pitch = max(MINPITCH, current_pitch - 3)
+            stdscr.move(1, 0)
+            stdscr.clrtoeol() 
+            stdscr.addstr(1, 0, f"[*] Pitch down to {current_pitch}")
+            stdscr.refresh()
+        elif key == 263:            
+            current_pitch = min(MAXPITCH, current_pitch + 3)
+            stdscr.move(1, 0)
+            stdscr.clrtoeol() 
+            stdscr.addstr(1, 0, f"[*] Pitch up to {current_pitch}")
+            stdscr.refresh()        
         time.sleep(0.05)
 
 if __name__ == "__main__":
