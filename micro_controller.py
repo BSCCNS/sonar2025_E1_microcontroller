@@ -1,3 +1,4 @@
+# https://github.com/kriomant/ch57x-keyboard-tool/tree/master
 import sounddevice as sd
 import numpy as np
 # parece que wave es el emas rapido https://github.com/bastibe/python-soundfile/issues/376
@@ -9,8 +10,11 @@ import os
 import subprocess
 import curses
 import shutil
+from pathlib import Path
 
-from socketudp import send_wf_point
+from socketudp import (send_wf_point, send_play_task, 
+    send_converting_task, send_cancel_task,
+    send_okconverted_task)
 # TODO FINISH THE REST OF COMMS
 try:
     COLUMNS, _ = shutil.get_terminal_size()
@@ -23,6 +27,15 @@ SAMPLE_RATE = 44100 # Sample rate in Hz check with microphone
 CHANNELS = 1 # Number of audio channels (1 for mono, 2 for stereo)
 BLOCKSIZE = 4096 # Block size for audio processing, smaller uses more cpu but gives faster response
 SAMPLEWIDTH = 3 # 24 bits per sample, better wavs
+GAIN = 10
+ROOTFOLDER = Path.absolute(Path("./audio/"))
+
+INPUTFOLDER = ROOTFOLDER / "input"
+OUTPUTFOLDER = ROOTFOLDER / "output"
+# Ensure input and output directories exist
+INPUTFOLDER.mkdir(parents=True, exist_ok=True)
+OUTPUTFOLDER.mkdir(parents=True, exist_ok=True)
+
 
 # Global control flags
 recording = False
@@ -30,6 +43,7 @@ cancel_requested = False
 waiting_for_file = False
 wait_cancel_event = threading.Event()
 last_file_created = None
+LS_last_file_created = None
 
 # Create a nice output gradient using ANSI escape sequences.
 # Stolen from https://gist.github.com/maurisvh/df919538bcef391bc89f
@@ -45,29 +59,31 @@ def send_volume_levels(audio_queue, stop_event, stdscr):
         send_wf_point(volume)
         # message = str(volume).encode()
         # sock.sendto(message, (UDP_IP, UDP_PORT))
-        col = int(100 * volume * (COLUMNS - 1))  # Scale volume to terminal width
+        col = int(GAIN * volume * (COLUMNS - 1))  # Scale volume to terminal width
         col = min(max(col, 0), COLUMNS - 1)  # Ensure col is within bounds
         line = '█' * col + ' ' * (COLUMNS - col)
         stdscr.addstr(2, 0, line)  
 
-
-
 def wait_for_converted_file(converted_filename, wait_cancel_event, stdscr):
-    global waiting_for_file, last_file_created
+    global waiting_for_file, last_file_created, LS_last_file_created
+    send_converting_task() ## Tell Unreal Engine we are converting
     waiting_for_file = True
     screen_clear(stdscr)
     stdscr.addstr(1, 0, f"[*] Waiting for {converted_filename} to appear... (press ctrl-X to cancel)")
     stdscr.refresh()    
     while not os.path.exists(converted_filename):
         if wait_cancel_event.is_set():
+            send_cancel_task() ## Tell Unreal Engine we canceled the conversion
             stdscr.addstr(2, 0, "[x] Waiting for converted file canceled by user.")
             stdscr.refresh()    
             waiting_for_file = False
             return
         time.sleep(0.05)
+    send_okconverted_task(str(last_file_created), str(LS_last_file_created)) ## Tell Unreal Engine we are ready to play
     stdscr.addstr(2, 0, f"[✓] Converted file detected: {converted_filename}")
     stdscr.refresh()        
     last_file_created = converted_filename
+    LS_last_file_created = "LS_"+ converted_filename.with_suffix('.csv')  
     waiting_for_file = False
 
 def save_to_wav(filename, audio_np):
@@ -94,8 +110,9 @@ def save_to_wav(filename, audio_np):
 def record_audio(stdscr):
     global recording, cancel_requested, wait_cancel_event, waiting_for_file
 
-    filename = f"recording_{int(time.time())}.wav"
-    converted_filename = filename.replace('.wav', '_converted.wav')
+    timestamp = f"{int(time.time())}"
+    filename = INPUTFOLDER / f"recording_{timestamp}.wav"
+    converted_filename = OUTPUTFOLDER / f"recording_{timestamp}_converted.wav"
     audio_data = []
     audio_queue = []
     stop_event = threading.Event()
@@ -153,7 +170,7 @@ def record_audio(stdscr):
         stdscr.refresh()         
         ### SEND TO CONVERSION
         time.sleep(3) # TODO delete in production and chango to Applio call
-        cmd = ["cp", filename, converted_filename]  # Replace with your actual command
+        cmd = ["cp", str(filename), str(converted_filename)]  # Replace with your actual command
         stdscr.addstr(4, 0, f"[*] Running conversion asynchronously: {' '.join(cmd)}") 
         stdscr.refresh()
         try:
@@ -182,7 +199,7 @@ def screen_clear(stdscr):
 
 
 def main(stdscr):
-    global recording, cancel_requested, waiting_for_file, wait_cancel_event, last_file_created
+    global recording, cancel_requested, waiting_for_file, wait_cancel_event, LS_last_file_created
 
     curses.noecho()
     curses.cbreak()
@@ -205,6 +222,7 @@ def main(stdscr):
                 wait_cancel_event.set()
         elif key == 16 and not recording and not waiting_for_file:  # Ctrl+P
             if last_file_created is not None:
+                send_play_task(str(last_file_created), str(LS_last_file_created))
                 stdscr.addstr(1, 0, f"[*] Started playing...{last_file_created}")  
                 stdscr.refresh()              
             else:

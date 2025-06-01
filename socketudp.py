@@ -5,8 +5,8 @@ import time
 import numpy as np
 from socket import *
 
-# Tiempo mínimo entre un envío y el siguiente
-MIN_TIME = 4200000 # 240fps
+# Tiempo mínimo entre un envío y el siguiente en microsegundos.
+MIN_TIME = 4200000 # aprox 240fps
 
 class SocketUDP():
     """Clase para enviar datos por UDP
@@ -44,7 +44,7 @@ class SocketUDP():
         else:
             close_it()
 
-    def send(self, message_dict):
+    def send(self, message_dict, important=False):
         """
         """
 
@@ -53,19 +53,64 @@ class SocketUDP():
         logging.debug(f"Current: {current}")
         logging.debug(f"Last   : {self.last_call}")
 
-        if current - self.last_call < self.min_time:
+        if current - self.last_call < self.min_time and not important:
             logging.warning(f"Llamadas muy próximas. Ignorando frame")
             return 
+        elif current - self.last_call < self.min_time and important:
+            time.sleep((self.min_time - (current - self.last_call)) / 1e9)
             
         self.socket.sendto((json.dumps(message_dict)).encode(), self.address)
         self.last_call = current
 
         logging.debug(f"Message sent")
 
+def send_converting_task():
+    d = {'type': 'converting',
+        'message': {'data': 1}}
+    with SocketUDP("localhost", debug= None) as socket:    
+        socket.send(d, True)    
+
+def send_okconverted_task(filename, array):
+    d = {'type': 'readytoplay',
+        'message': {'data': filename}}
+    with SocketUDP("localhost", debug= None) as socket:    
+        socket.send(d, True)   
+    send_saved_array(array)
+
+def send_cancel_task():
+    d = {'type': 'cancel',
+        'message': {'data': 0}}    
+    with SocketUDP("localhost", debug= None) as socket:    
+        socket.send(d, True)   
+
+def send_play_task(filename, array):
+    d = {'type': 'fileplay',
+        'message': {'data': filename}}
+    with SocketUDP("localhost", debug= None) as socket:    
+        socket.send(d, True)
+    send_saved_array(array)
+
+def send_saved_array(array):
+    for i, row in enumerate(array):
+        send_saved_slice(row, frame = i)
+    send_saved_finish()
+
+def send_saved_slice(array_xyz, frame = 0):
+    d = {'type': 'lsrecorded',
+        'message': {'frame': frame, 'data': array_xyz}}
+    with SocketUDP("localhost", debug= None) as socket:    
+        socket.send(d)
+
+def send_saved_finish():
+    d = {'type': 'end_lsrecorded',
+        'message': {'frame': -1}}
+    with SocketUDP("localhost", debug= None) as socket:
+        socket.send(d, True)
+
+
 def send_wf_point(y):
     d = {'type': 'waveform',
-        'message': {'data': y}}
-    
+        'message': {'data': y}}    
     with SocketUDP("localhost", debug= None) as socket:
         socket.send(d)
 
@@ -85,7 +130,7 @@ def send_ls_finish():
     d = {'type': 'end_latent',
         'message': {'frame': -1}}
     with SocketUDP("localhost", debug= None) as socket:
-        socket.send(d)
+        socket.send(d, True)
 
 if __name__ == "__main__":
     data = [[1,2,3],[4,5,6],[7,8,9]]
