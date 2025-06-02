@@ -296,12 +296,27 @@ def main(stdscr):
                 stdscr.refresh()
         elif key == 7:
             current_pitch = max(MINPITCH, current_pitch - 3)
+            if current_pitch < 0:
+                s="-"
+            elif current_pitch > 0: 
+                s = "+"
+            else:
+                s = ""  
+            send_message(f"pitch_{s}{str(current_pitch).zfill(2)}")
             stdscr.move(1, 0)
             stdscr.clrtoeol() 
             stdscr.addstr(1, 0, f"[*] Pitch down to {current_pitch}")
             stdscr.refresh()
-        elif key == 263:            
-            current_pitch = min(MAXPITCH, current_pitch + 3)
+        elif key == 263:   
+            current_pitch = min(MAXPITCH, current_pitch + 3)         
+            if current_pitch < 0:
+                s="-"
+            elif current_pitch > 0: 
+                s = "+"
+            else:
+                s = ""  
+            send_message(f"pitch_{s}{str(current_pitch).zfill(2)}")
+            send_message(f"pitch_{current_pitch}")
             stdscr.move(1, 0)
             stdscr.clrtoeol() 
             stdscr.addstr(1, 0, f"[*] Pitch up to {current_pitch}")
