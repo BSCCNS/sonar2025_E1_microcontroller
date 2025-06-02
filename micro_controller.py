@@ -61,41 +61,47 @@ playing_file = False
 
 # Create a nice output gradient using ANSI escape sequences.
 # Stolen from https://gist.github.com/maurisvh/df919538bcef391bc89f
-def send_volume_levels(audio_queue, stop_event):    
-    while not stop_event.is_set():
-        if not audio_queue:
-            time.sleep(0.05)
-            continue
-        chunk = audio_queue.pop(0)
-        # rms = librosa.feature.rms(y=indata)
-        # vol = np.mean(rms)
-        volume = float(np.linalg.norm(chunk) / len(chunk))
-        send_wf_point(volume)
-        # message = str(volume).encode()
-        # sock.sendto(message, (UDP_IP, UDP_PORT))
-        col = int(GAIN * volume * (COLUMNS - 1))  # Scale volume to terminal width
-        col = min(max(col, 0), COLUMNS - 1)  # Ensure col is within bounds
-        line = '█' * col + ' ' * (COLUMNS - col)
-        screen_clear(line)
+def send_volume_levels(audio_queue, stop_event):  
+    try:  
+        while not stop_event.is_set():
+            if not audio_queue:
+                time.sleep(0.05)
+                continue
+            chunk = audio_queue.pop(0)
+            # rms = librosa.feature.rms(y=indata)
+            # vol = np.mean(rms)
+            volume = float(np.linalg.norm(chunk) / len(chunk))
+            send_wf_point(volume)
+            # message = str(volume).encode()
+            # sock.sendto(message, (UDP_IP, UDP_PORT))
+            col = int(GAIN * volume * (COLUMNS - 1))  # Scale volume to terminal width
+            col = min(max(col, 0), COLUMNS - 1)  # Ensure col is within bounds
+            line = '█' * col + ' ' * (COLUMNS - col)
+            screen_clear(line)
+    except Exception as e:
+        print(f"[!] Error in sending volume levels: {e}")
 
 def wait_for_converted_file(converted_filename, wait_cancel_event):
     global waiting_for_file, last_file_created
-    send_message(CONVERTING) ## Tell Unreal Engine we are converting
-    waiting_for_file = True
-    screen_clear(f"[*] Waiting for {converted_filename} to appear... (press ctrl-X to cancel)")
-    while not os.path.exists(converted_filename):
-        if wait_cancel_event.is_set():
-            send_message(CANCEL) ## Tell Unreal Engine we canceled the conversion
-            screen_clear("[x] Waiting for converted file canceled by user.")
-            waiting_for_file = False
-            return
-        time.sleep(0.05)    
-    send_message(READYTOPLAY) ## Tell Unreal Engine we are ready to play
-    latent_data = pd.read_csv(str(converted_filename)[:-4]+"_feats_3d.csv", index_col=0)
-    send_ls_array(latent_data.values.to_list())
-    screen_clear(f"[✓] Converted file detected: {converted_filename}")
-    last_file_created = converted_filename
-    waiting_for_file = False
+    try:
+        send_message(CONVERTING) ## Tell Unreal Engine we are converting
+        waiting_for_file = True
+        screen_clear(f"[*] Waiting for {converted_filename} to appear... (press ctrl-X to cancel)")
+        while not os.path.exists(converted_filename):
+            if wait_cancel_event.is_set():
+                send_message(CANCEL) ## Tell Unreal Engine we canceled the conversion
+                screen_clear("[x] Waiting for converted file canceled by user.")
+                waiting_for_file = False
+                return
+            time.sleep(0.05)    
+        send_message(READYTOPLAY) ## Tell Unreal Engine we are ready to play
+        latent_data = pd.read_csv(str(converted_filename)[:-4]+"_feats_3d.csv", index_col=0)
+        send_ls_array(latent_data.values.to_list())
+        screen_clear(f"[✓] Converted file detected: {converted_filename}")
+        last_file_created = converted_filename
+        waiting_for_file = False
+    except Exception as e:
+        print(f"[!] Error in waiting for conversion: {e}")    
 
 def play_wav(filename):
     global playing_file
@@ -155,74 +161,77 @@ def save_to_wav(filename, audio_np):
 
 
 def record_audio():
-    global recording, cancel_requested, wait_cancel_event, waiting_for_file, current_pitch
-    timestamp = f"{int(time.time())}"
-    filename = INPUTFOLDER / f"recording_{timestamp}.wav"
-    converted_filename = OUTPUTFOLDER / f"recording_{timestamp}_converted.wav"
-    audio_data = []
-    audio_queue = []
-    stop_event = threading.Event()
-    cancel_requested = False
-    recording = True
-    wait_cancel_event.clear()
-    waiting_for_file = False
+    try: # protect against volume up/down
+        global recording, cancel_requested, wait_cancel_event, waiting_for_file, current_pitch
+        timestamp = f"{int(time.time())}"
+        filename = INPUTFOLDER / f"recording_{timestamp}.wav"
+        converted_filename = OUTPUTFOLDER / f"recording_{timestamp}_converted.wav"
+        audio_data = []
+        audio_queue = []
+        stop_event = threading.Event()
+        cancel_requested = False
+        recording = True
+        wait_cancel_event.clear()
+        waiting_for_file = False
 
-    screen_clear(f"[*] Recording started. Press ctrl-X to cancel.")  
+        screen_clear(f"[*] Recording started. Press ctrl-X to cancel.")  
 
-    udp_thread = threading.Thread(target=send_volume_levels, args=(audio_queue, stop_event))
-    udp_thread.start()
+        udp_thread = threading.Thread(target=send_volume_levels, args=(audio_queue, stop_event))
+        udp_thread.start()
 
-    def callback(indata, frames, time_info, status):
-        if cancel_requested:
-            raise sd.CallbackStop
-        audio_data.append(indata.copy())
-        audio_queue.append(indata.copy())
+        def callback(indata, frames, time_info, status):
+            if cancel_requested:
+                raise sd.CallbackStop
+            audio_data.append(indata.copy())
+            audio_queue.append(indata.copy())
 
-    try:
-        send_message(RECORDING)
-        with sd.InputStream(callback=callback, 
-                            channels=CHANNELS, 
-                            samplerate=SAMPLE_RATE,
-                            blocksize=BLOCKSIZE):
-            start_time = time.time()
-            while (time.time() - start_time) < RECORD_SECONDS:
-                if cancel_requested:
-                    break
-                time.sleep(0.1)  # Check every 50ms for cancellation
-    except sd.CallbackStop:
-        screen_clear(f"[!] Recording canceled.")  
-    finally:
-        stop_event.set()
-        udp_thread.join()
-        recording = False
-
-    if not cancel_requested:
-        send_message(STOPRECORDING)
-        screen_clear(f"[*] Saving to {filename}...")          
-        audio_np = np.concatenate(audio_data, axis=0)
-        save_to_wav(filename, audio_np)
-        screen_clear(f"[✓] Saved to {filename}")          
-        ### SEND TO CONVERSION
-        # for debugging
-        #time.sleep(3) # TODO delete in production and chango to Applio call
-        #cmd = ["cp", str(filename), str(converted_filename)]  # Replace with your actual command
-        cmd = ["python", "infer_script.py", str(filename), str(converted_filename), current_pitch]
-        screen_clear(f"[*] Running conversion asynchronously: {' '.join(cmd)}") 
         try:
-            proc = subprocess.Popen(cmd)
-            # Do NOT wait for proc to finish here!
-        except Exception as e:
-            screen_clear(f"[x] Conversion failed to start: {e}")  
+            send_message(RECORDING)
+            with sd.InputStream(callback=callback, 
+                                channels=CHANNELS, 
+                                samplerate=SAMPLE_RATE,
+                                blocksize=BLOCKSIZE):
+                start_time = time.time()
+                while (time.time() - start_time) < RECORD_SECONDS:
+                    if cancel_requested:
+                        break
+                    time.sleep(0.1)  # Check every 50ms for cancellation
+        except sd.CallbackStop:
+            screen_clear(f"[!] Recording canceled.")  
+        finally:
+            stop_event.set()
+            udp_thread.join()
+            recording = False
 
-        # Wait for conversion
-        wait_thread = threading.Thread(target=wait_for_converted_file, args=(converted_filename, wait_cancel_event))
-        wait_thread.start()
-        wait_thread.join()
-        # while not os.path.exists(converted_filename):
-        #     time.sleep(1)
-        # print(f"[✓] Converted file detected: {converted_filename}")
-    else:
-        screen_clear(f"[x] Recording not saved.")  
+        if not cancel_requested:
+            send_message(STOPRECORDING)
+            screen_clear(f"[*] Saving to {filename}...")          
+            audio_np = np.concatenate(audio_data, axis=0)
+            save_to_wav(filename, audio_np)
+            screen_clear(f"[✓] Saved to {filename}")          
+            ### SEND TO CONVERSION
+            # for debugging
+            #time.sleep(3) # TODO delete in production and chango to Applio call
+            #cmd = ["cp", str(filename), str(converted_filename)]  # Replace with your actual command
+            cmd = ["python", "infer_script.py", str(filename), str(converted_filename), current_pitch]
+            screen_clear(f"[*] Running conversion asynchronously: {' '.join(cmd)}") 
+            try:
+                proc = subprocess.Popen(cmd)
+                # Do NOT wait for proc to finish here!
+            except Exception as e:
+                screen_clear(f"[x] Conversion failed to start: {e}")  
+
+            # Wait for conversion
+            wait_thread = threading.Thread(target=wait_for_converted_file, args=(converted_filename, wait_cancel_event))
+            wait_thread.start()
+            wait_thread.join()
+            # while not os.path.exists(converted_filename):
+            #     time.sleep(1)
+            # print(f"[✓] Converted file detected: {converted_filename}")
+        else:
+            screen_clear(f"[x] Recording not saved.") 
+    except  Exception as e:
+        print(f"[!] Error in record_audio: {e}")
 
 def screen_clear(text=None):
     os.system("clear")
