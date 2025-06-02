@@ -1,6 +1,7 @@
 
 
 import sounddevice as sd
+import pandas as pd
 import numpy as np
 # parece que wave es el emas rapido https://github.com/bastibe/python-soundfile/issues/376
 import wave
@@ -92,6 +93,8 @@ def wait_for_converted_file(converted_filename, wait_cancel_event):
     temp = np.random.rand(500,3)
     temp = [ [float(x) for x in row] for row in temp ]  # Convert to list of lists
     send_message(READYTOPLAY) ## Tell Unreal Engine we are ready to play
+    latent_data = pd.read_csv(str(converted_filename)[:-4]+"_feats_3d.csv")
+    send_ls_array(latent_data.values)
     screen_clear(f"[✓] Converted file detected: {converted_filename}")
     last_file_created = converted_filename
     waiting_for_file = False
