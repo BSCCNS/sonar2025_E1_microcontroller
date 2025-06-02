@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 from pynput import keyboard
 
-from socketudp import (send_wf_point, send_message, send_ls_array)
+from websocket.socketudp import (send_wf_point, send_message, send_ls_array)
 
 # TODO FINISH THE REST OF COMMS
 try:
@@ -109,7 +109,11 @@ def play_wav(filename):
         start = callback.pos
         end = start + frames
         if data.ndim == 1:
-            outdata[:, 0] = data[start:end]
+            if (outdata.shape[0]<frames):
+                outdata[:frames, 0] = data[start:end]
+                outdata[frames:, 0] = 0
+            else:
+                outdata[:, 0] = data[start:end]
         else:
             outdata[:] = data[start:end]
         callback.pos = end        
@@ -202,7 +206,7 @@ def record_audio():
         # for debugging
         #time.sleep(3) # TODO delete in production and chango to Applio call
         #cmd = ["cp", str(filename), str(converted_filename)]  # Replace with your actual command
-        cmd = ["python", "infer_script.py", str(filename), str(converted_filename)]
+        cmd = ["python", "infer_script.py", str(filename), str(converted_filename), current_pitch]
         screen_clear(f"[*] Running conversion asynchronously: {' '.join(cmd)}") 
         try:
             proc = subprocess.Popen(cmd)
@@ -254,9 +258,7 @@ def on_play():
 def lower_pitch():
     global current_pitch
     current_pitch = max(MINPITCH, current_pitch - 3)
-    if current_pitch < 0:
-        s="-"
-    elif current_pitch > 0: 
+    if current_pitch > 0: 
         s = "+"
     else:
         s = ""  
@@ -264,10 +266,9 @@ def lower_pitch():
 
 
 def higher_pitch():
+    global current_pitch
     current_pitch = min(MAXPITCH, current_pitch + 3)         
-    if current_pitch < 0:
-        s="-"
-    elif current_pitch > 0: 
+    if current_pitch > 0: 
         s = "+"
     else:
         s = ""  
@@ -294,8 +295,10 @@ def main():
         except KeyboardInterrupt:
             print("Exiting...")
 
-if __name__ == "__main__":
+if __name__ == "__main__":    
     try:
         main()
-    except:
-        pass
+    except KeyboardInterrupt:
+        print("Exiting...")
+    except Exception as e:
+        print(f"[!] Unhandled exception: {e}")    
