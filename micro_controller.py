@@ -114,14 +114,14 @@ def play_wav(filename):
             raise sd.CallbackStop()
         start = callback.pos
         end = start + frames
+        end = min(end, len(data))
+        realframes = end-start
         if data.ndim == 1:
-            if (outdata.shape[0]<frames):
-                outdata[:frames, 0] = data[start:end]
-                outdata[frames:, 0] = 0
-            else:
-                outdata[:, 0] = data[start:end]
+            outdata[:,0]=0
+            outdata[:realframes,0]=data[start:end]
         else:
-            outdata[:] = data[start:end]
+            outdata[:]=0
+            outdata[:realframes]=data[start:end]
         callback.pos = end        
         if end >= len(data):
             playing_file = False
