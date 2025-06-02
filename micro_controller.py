@@ -79,7 +79,7 @@ def send_volume_levels(audio_queue, stop_event):
         screen_clear(line)
 
 def wait_for_converted_file(converted_filename, wait_cancel_event):
-    global waiting_for_file, last_file_created, current_pitch
+    global waiting_for_file, last_file_created
     send_message(CONVERTING) ## Tell Unreal Engine we are converting
     waiting_for_file = True
     screen_clear(f"[*] Waiting for {converted_filename} to appear... (press ctrl-X to cancel)")
@@ -151,8 +151,7 @@ def save_to_wav(filename, audio_np):
 
 
 def record_audio():
-    global recording, cancel_requested, wait_cancel_event, waiting_for_file
-
+    global recording, cancel_requested, wait_cancel_event, waiting_for_file, current_pitch
     timestamp = f"{int(time.time())}"
     filename = INPUTFOLDER / f"recording_{timestamp}.wav"
     converted_filename = OUTPUTFOLDER / f"recording_{timestamp}_converted.wav"
