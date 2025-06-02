@@ -12,9 +12,8 @@ import curses
 import shutil
 from pathlib import Path
 
-from socketudp import (send_wf_point, send_play_task, 
-    send_converting_task, send_cancel_task,
-    send_okconverted_task)
+from socketudp import (send_wf_point, send_message, send_ls_array)
+
 # TODO FINISH THE REST OF COMMS
 try:
     COLUMNS, _ = shutil.get_terminal_size()
@@ -27,7 +26,7 @@ SAMPLE_RATE = 44100 # Sample rate in Hz check with microphone
 CHANNELS = 1 # Number of audio channels (1 for mono, 2 for stereo)
 BLOCKSIZE = 4096 # Block size for audio processing, smaller uses more cpu but gives faster response
 SAMPLEWIDTH = 3 # 24 bits per sample, better wavs
-GAIN = 10
+GAIN = 200
 ROOTFOLDER = Path.absolute(Path("./audio/"))
 
 INPUTFOLDER = ROOTFOLDER / "input"
@@ -38,14 +37,25 @@ OUTPUTFOLDER.mkdir(parents=True, exist_ok=True)
 MAXPITCH = 18
 MINPITCH = -18
 
+
+## Messages to Unreal Engine
+CANCEL = "cancel"
+CONVERTING = "converting"
+PLAY = "play"
+READYTOPLAY = "ready_to_play"
+RECORDING = "start_waveform"
+STOPRECORDING = "end_waveform"
+
+
 # Global control flags
 recording = False
 cancel_requested = False
 waiting_for_file = False
 wait_cancel_event = threading.Event()
+play_cancel_event = threading.Event()
 last_file_created = None
-LS_last_file_created = None
 current_pitch = 0
+playing_file = False
 
 # Create a nice output gradient using ANSI escape sequences.
 # Stolen from https://gist.github.com/maurisvh/df919538bcef391bc89f
@@ -67,26 +77,61 @@ def send_volume_levels(audio_queue, stop_event, stdscr):
         stdscr.addstr(2, 0, line)  
 
 def wait_for_converted_file(converted_filename, wait_cancel_event, stdscr):
-    global waiting_for_file, last_file_created, LS_last_file_created, current_pitch
-    send_converting_task() ## Tell Unreal Engine we are converting
+    global waiting_for_file, last_file_created, current_pitch
+    send_message(CONVERTING) ## Tell Unreal Engine we are converting
     waiting_for_file = True
     screen_clear(stdscr)
     stdscr.addstr(1, 0, f"[*] Waiting for {converted_filename} to appear... (press ctrl-X to cancel)")
     stdscr.refresh()    
     while not os.path.exists(converted_filename):
         if wait_cancel_event.is_set():
-            send_cancel_task() ## Tell Unreal Engine we canceled the conversion
-            stdscr.addstr(2, 0, "[x] Waiting for converted file canceled by user.")
+            send_message(CANCEL) ## Tell Unreal Engine we canceled the conversion
+            stdscr.clrtoeol()
+            stdscr.addstr(1, 0, "[x] Waiting for converted file canceled by user.")
             stdscr.refresh()    
             waiting_for_file = False
             return
         time.sleep(0.05)
-    send_okconverted_task(str(last_file_created), str(LS_last_file_created)) ## Tell Unreal Engine we are ready to play
-    stdscr.addstr(2, 0, f"[✓] Converted file detected: {converted_filename}")
+    temp = np.random.rand(500,3)
+    temp = [ [float(x) for x in row] for row in temp ]  # Convert to list of lists
+    send_message(READYTOPLAY) ## Tell Unreal Engine we are ready to play
+    stdscr.clrtoeol()
+    stdscr.addstr(1, 0, f"[✓] Converted file detected: {converted_filename}")
     stdscr.refresh()        
     last_file_created = converted_filename
-    LS_last_file_created = converted_filename.with_suffix('.csv')  
     waiting_for_file = False
+
+def play_wav(filename):
+    global playing_file
+    play_cancel_event.clear()
+    data, samplerate = sf.read(filename, dtype='float32')
+    blocksize = 1024  # Small block for responsive stop
+
+    def callback(outdata, frames, time, status):
+        if play_cancel_event.is_set():
+            raise sd.CallbackStop()
+        start = callback.pos
+        end = start + frames
+        if data.ndim == 1:
+            outdata[:, 0] = data[start:end]
+        else:
+            outdata[:] = data[start:end]
+        callback.pos = end        
+        if end >= len(data):
+            playing_file = False
+            raise sd.CallbackStop()
+    callback.pos = 0
+
+    try:
+        playing_file = True
+        with sd.OutputStream(samplerate=samplerate, channels=data.shape[1] if data.ndim > 1 else 1,
+                             callback=callback, blocksize=blocksize):
+            while callback.pos < len(data) and not play_cancel_event.is_set():
+                time.sleep(0.05)
+        playing_file = False
+    except sd.CallbackStop:
+        playing_file = False
+        pass
 
 def save_to_wav(filename, audio_np):
     if SAMPLEWIDTH == 3:
@@ -132,6 +177,7 @@ def record_audio(stdscr):
     udp_thread = threading.Thread(target=send_volume_levels, args=(audio_queue, stop_event, stdscr))
     udp_thread.start()
 
+    
     def callback(indata, frames, time_info, status):
         if cancel_requested:
             raise sd.CallbackStop
@@ -139,6 +185,7 @@ def record_audio(stdscr):
         audio_queue.append(indata.copy())
 
     try:
+        send_message(RECORDING)
         with sd.InputStream(callback=callback, 
                             channels=CHANNELS, 
                             samplerate=SAMPLE_RATE,
@@ -148,7 +195,6 @@ def record_audio(stdscr):
                 if cancel_requested:
                     break
                 time.sleep(0.1)  # Check every 50ms for cancellation
-
     except sd.CallbackStop:
         stdscr.move(1, 0)
         stdscr.clrtoeol()         
@@ -160,20 +206,21 @@ def record_audio(stdscr):
         recording = False
 
     if not cancel_requested:
-        stdscr.move(2, 0)
+        send_message(STOPRECORDING)
+        stdscr.move(1, 0)
         stdscr.clrtoeol()         
-        stdscr.addstr(2, 0, f"[*] Saving to {filename}...")  
+        stdscr.addstr(1, 0, f"[*] Saving to {filename}...")  
         stdscr.refresh()           
         audio_np = np.concatenate(audio_data, axis=0)
         save_to_wav(filename, audio_np)
-        stdscr.move(3, 0)
+        stdscr.move(1, 0)
         stdscr.clrtoeol()         
-        stdscr.addstr(3, 0, f"[✓] Saved to {filename}")  
+        stdscr.addstr(1, 0, f"[✓] Saved to {filename}")  
         stdscr.refresh()         
         ### SEND TO CONVERSION
         time.sleep(3) # TODO delete in production and chango to Applio call
         cmd = ["cp", str(filename), str(converted_filename)]  # Replace with your actual command
-        stdscr.addstr(4, 0, f"[*] Running conversion asynchronously: {' '.join(cmd)}") 
+        stdscr.addstr(1, 0, f"[*] Running conversion asynchronously: {' '.join(cmd)}") 
         stdscr.refresh()
         try:
             proc = subprocess.Popen(cmd)
@@ -201,7 +248,7 @@ def screen_clear(stdscr):
 
 
 def main(stdscr):
-    global recording, cancel_requested, waiting_for_file, wait_cancel_event, LS_last_file_created, current_pitch
+    global recording, cancel_requested, waiting_for_file, wait_cancel_event, current_pitch
 
     curses.noecho()
     curses.cbreak()
@@ -211,11 +258,13 @@ def main(stdscr):
 
     while True:
         key = stdscr.getch()
-        if key!=-1:
-            stdscr.addstr(5, 0, f"{key} ")  # Debugging line to show key pressed
+        #if key!=-1:
+        #    stdscr.addstr(5, 0, f"{key} ")  # Debugging line to show key pressed
         if key == 3:  # Ctrl+C
             break
         elif key == 18 and not recording and not waiting_for_file:  # Ctrl+R
+            if playing_file:
+                play_cancel_event.set()
             threading.Thread(target=record_audio, args=(stdscr,)).start()
         elif key == 24:  # Ctrl+X            
             if recording:
@@ -226,10 +275,18 @@ def main(stdscr):
                 stdscr.addstr(1, 0, "[x] Canceling waiting for converted file...")
                 stdscr.refresh()
                 wait_cancel_event.set()
+            if playing_file:
+                play_cancel_event.set()
+                stdscr.move(1, 0)
+                stdscr.clrtoeol() 
+                stdscr.addstr(1, 0, "[x] Canceling play...")
+                stdscr.refresh()
         elif key == 16 and not recording and not waiting_for_file:  # Ctrl+P
+            play_cancel_event.set()
             if last_file_created is not None:
-                send_play_task(str(last_file_created), str(LS_last_file_created))
+                send_message(PLAY)
                 screen_clear(stdscr)
+                threading.Thread(target=play_wav, args=(str(last_file_created),)).start()
                 stdscr.addstr(1, 0, f"[*] Started playing...{last_file_created}")  
                 stdscr.refresh()              
             else:
@@ -251,6 +308,23 @@ def main(stdscr):
             stdscr.refresh()        
         time.sleep(0.05)
 
+class curses_screen:
+    def __enter__(self):
+        self.stdscr = curses.initscr()
+        curses.cbreak()
+        curses.noecho()
+        self.stdscr.keypad(1)
+        SCREEN_HEIGHT, SCREEN_WIDTH = self.stdscr.getmaxyx()
+        return self.stdscr
+    def __exit__(self,a,b,c):
+        curses.nocbreak()
+        self.stdscr.keypad(0)
+        curses.echo()
+        curses.endwin()
+
 if __name__ == "__main__":
-    curses.wrapper(main)
+    with curses_screen() as stdscr:
+        main(stdscr=stdscr)
+
+    #curses.wrapper(main)
 
